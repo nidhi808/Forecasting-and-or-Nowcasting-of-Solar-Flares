@@ -16,3 +16,7 @@ python-multipart
 beautifulsoup4
 lxml
 zeep
+pytest
+drms
+netCDF4
+h5py

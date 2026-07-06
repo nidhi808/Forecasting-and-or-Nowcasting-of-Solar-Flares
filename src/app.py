@@ -15,7 +15,7 @@ from src.data.fits_processor import read_l1_fits
 from src.data.cadence_sync import sync_cadences
 from src.data.noise_filter import clean_time_series
 from src.nowcasting.nowcaster import detect_flares_rule_based, MLNowcaster
-from src.forecasting.forecaster import engineer_forecasting_features, XGBForecaster
+from src.forecasting.forecaster import engineer_forecasting_features, XGBForecaster, CNNLSTMForecasterWrapper
 
 app = FastAPI(title="Solar Flare Nowcasting & Forecasting Telemetry API")
 
@@ -32,6 +32,7 @@ app.add_middleware(
 live_telemetry_df = None
 master_catalog_df = None
 xgb_forecaster = None
+cnn_lstm_forecaster = None
 ml_nowcaster = None
 
 # Cache directory paths
@@ -42,7 +43,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 # Initialize models
 def load_models():
-    global xgb_forecaster, ml_nowcaster
+    global xgb_forecaster, ml_nowcaster, cnn_lstm_forecaster
     
     # Load XGBoost forecaster
     xgb_forecaster = XGBForecaster()
@@ -54,6 +55,17 @@ def load_models():
             print(f"Error loading XGBoost model: {e}")
     else:
         print("XGBoost forecaster model not found. Running in simulation mode for forecasting.")
+        
+    # Load CNN-LSTM forecaster
+    cnn_lstm_forecaster = CNNLSTMForecasterWrapper(input_dim=36, seq_len=60)
+    cnn_lstm_path = os.path.join(MODELS_DIR, "cnn_lstm_model.pt")
+    if os.path.exists(cnn_lstm_path):
+        try:
+            cnn_lstm_forecaster.load(cnn_lstm_path)
+        except Exception as e:
+            print(f"Error loading CNN-LSTM model: {e}")
+    else:
+        print("CNN-LSTM forecaster model not found. Running in simulation mode for CNN-LSTM forecasting.")
         
     # Load ML nowcaster (Random Forest)
     ml_nowcaster = MLNowcaster()
@@ -147,36 +159,48 @@ def get_nowcast_catalog():
     return catalog.to_dict(orient="records")
 
 @app.get("/api/predict")
-def get_live_forecast_probability():
+def get_live_forecast_probability(model_type: str = "xgb"):
     """
     Calculates and returns the probability of a solar flare in the next 15-45 mins
-    using the latest 60 minutes of telemetry.
+    using the latest 60 minutes of telemetry. Exposes both XGBoost and CNN-LSTM models.
+    Also returns the current real-time ML-nowcasted solar flare state of the Sun.
     """
-    global live_telemetry_df, xgb_forecaster
-    if live_telemetry_df is None or len(live_telemetry_df) < 3600:
-        # Fallback to simulation probability if not enough data
-        import random
-        # Simulate high probability if we're near the flares
-        # In mock data, peaks are at t=15000, 45000, 70000
-        # We can simulate warning state
-        return {"probability": round(random.uniform(0.01, 0.05), 3), "status": "Quiet"}
+    global live_telemetry_df, xgb_forecaster, cnn_lstm_forecaster, ml_nowcaster
+    
+    # Ensure minimum telemetry exists
+    if live_telemetry_df is None or len(live_telemetry_df) < 100:
+        return {
+            "probability": 0.05,
+            "status": "Quiet",
+            "nowcast_class": "Quiet",
+            "model_type": model_type,
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        }
         
     # Get latest 60 minutes (3600 seconds)
     latest_df = live_telemetry_df.tail(3600).reset_index(drop=True)
     
     # Engineer features
     feat_df, feat_cols = engineer_forecasting_features(latest_df)
-    X = feat_df[feat_cols].tail(1).values
     
-    if xgb_forecaster and xgb_forecaster.is_trained:
-        prob = xgb_forecaster.predict_probability(X)[0]
-    else:
-        # Simulating based on Clean SoLEXS derivative velocity
-        # If soft x-ray starts rising rapidly, probability shoots up
-        last_sxr_clean = latest_df['flux_solexs_clean'].iloc[-1]
+    # 1. FORECASTING
+    prob = 0.05
+    is_simulated = True
+    
+    if model_type == "cnn_lstm":
+        if cnn_lstm_forecaster and cnn_lstm_forecaster.is_trained:
+            # CNN-LSTM wrapper extracts and scales the last seq_len internally
+            prob = cnn_lstm_forecaster.predict_probability(feat_df[feat_cols].values)
+            is_simulated = False
+    else: # Default is xgb
+        if xgb_forecaster and xgb_forecaster.is_trained:
+            X = feat_df[feat_cols].tail(1).values
+            prob = xgb_forecaster.predict_probability(X)[0]
+            is_simulated = False
+            
+    # If model is not trained/found, run mathematical simulation based on Clean SoLEXS derivative velocity
+    if is_simulated:
         last_deriv = np.gradient(latest_df['flux_solexs_clean'].values)[-1]
-        
-        # High derivative = high forecast probability
         if last_deriv > 1e-8:
             prob = min(0.95, 0.4 + last_deriv * 1e7)
         elif last_deriv > 2e-9:
@@ -192,9 +216,33 @@ def get_live_forecast_probability():
     elif prob > 0.2:
         status = "ELEVATED PRECURSOR ACTIVE"
         
+    # 2. NOWCASTING
+    nowcast_class = "Quiet"
+    if ml_nowcaster and ml_nowcaster.is_trained:
+        try:
+            # Use last 10 seconds of telemetry to extract features and predict current state
+            latest_10s = latest_df.tail(10).reset_index(drop=True)
+            pred_labels, _ = ml_nowcaster.predict(latest_10s)
+            nowcast_class = pred_labels[-1]
+        except Exception as e:
+            print(f"Error in ML nowcast prediction: {e}")
+    else:
+        # Simple rule-based fallback based on raw flux levels
+        last_flux = latest_df['flux_solexs_clean'].iloc[-1]
+        if last_flux >= 1e-4:
+            nowcast_class = "X-Class"
+        elif last_flux >= 1e-5:
+            nowcast_class = "M-Class"
+        elif last_flux >= 1e-6:
+            nowcast_class = "C-Class"
+        else:
+            nowcast_class = "Quiet"
+            
     return {
         "probability": float(round(prob, 3)),
         "status": status,
+        "nowcast_class": nowcast_class,
+        "model_type": model_type,
         "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     }
 

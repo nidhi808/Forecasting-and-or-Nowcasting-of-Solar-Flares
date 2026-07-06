@@ -157,7 +157,7 @@ class MLNowcaster:
         
         # Features: current fluxes, derivatives, and second derivatives
         feature_cols = [sxr_col, hxr_col, 'deriv_sxr', 'deriv_hxr', 'deriv2_sxr', 'deriv2_hxr']
-        X = df[feature_cols].fillna(method='ffill').fillna(0.0).values
+        X = df[feature_cols].ffill().fillna(0.0).values
         return X
         
     def train(self, df, labels, model_path='models/nowcaster_model.joblib'):

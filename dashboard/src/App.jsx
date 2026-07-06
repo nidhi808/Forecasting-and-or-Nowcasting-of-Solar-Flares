@@ -15,7 +15,8 @@ import Plotly from 'plotly.js-dist-min';
 function App() {
   const [telemetry, setTelemetry] = useState([]);
   const [catalog, setCatalog] = useState([]);
-  const [forecast, setForecast] = useState({ probability: 0.05, status: "Quiet" });
+  const [forecast, setForecast] = useState({ probability: 0.05, status: "Quiet", nowcast_class: "Quiet" });
+  const [modelType, setModelType] = useState('xgb');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   
@@ -47,7 +48,7 @@ function App() {
       setCatalog(catData);
 
       // Fetch forecast probability
-      const foreRes = await fetch(`${backendUrl}/api/predict`);
+      const foreRes = await fetch(`${backendUrl}/api/predict?model_type=${modelType}`);
       if (!foreRes.ok) throw new Error("Failed to fetch forecast prediction");
       const foreData = await foreRes.json();
       setForecast(foreData);
@@ -66,7 +67,7 @@ function App() {
     // Poll every 5 seconds for real-time telemetry updates
     const interval = setInterval(fetchData, 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [modelType]);
 
   // Update telemetry Plotly chart
   useEffect(() => {
@@ -298,9 +299,19 @@ function App() {
           <div className={`glass-panel p-5 flex flex-col justify-between ${criticalAlert ? 'pulse-alarm bg-red-950/20' : (activeAlert ? 'border-amber-500/40 bg-amber-950/10' : '')}`}>
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Predictive Forecaster</span>
-              <span className={`${criticalAlert ? 'text-red-500 bg-red-500/10' : (activeAlert ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500 bg-slate-500/10')} p-1.5 rounded-md border ${criticalAlert ? 'border-red-500/20' : (activeAlert ? 'border-amber-500/20' : 'border-slate-500/10')}`}>
-                <ShieldAlert className="h-4 w-4" />
-              </span>
+              <div className="flex items-center space-x-2">
+                <select 
+                  value={modelType} 
+                  onChange={(e) => setModelType(e.target.value)}
+                  className="text-[10px] bg-slate-905 border border-slate-800 rounded px-1.5 py-0.5 text-slate-300 focus:outline-none"
+                >
+                  <option value="xgb">XGBoost model</option>
+                  <option value="cnn_lstm">CNN-LSTM (PyTorch)</option>
+                </select>
+                <span className={`${criticalAlert ? 'text-red-500 bg-red-500/10' : (activeAlert ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500 bg-slate-500/10')} p-1.5 rounded-md border ${criticalAlert ? 'border-red-500/20' : (activeAlert ? 'border-amber-500/20' : 'border-slate-500/10')}`}>
+                  <ShieldAlert className="h-4 w-4" />
+                </span>
+              </div>
             </div>
             <div className="my-4">
               <div className="flex items-baseline space-x-1">
@@ -329,11 +340,24 @@ function App() {
                 <FileText className="h-4 w-4" />
               </span>
             </div>
-            <div className="my-4">
-              <div className="text-3xl font-bold font-mono tracking-tight text-slate-100">
-                {catalog.length}
+            <div className="my-4 flex items-center justify-between">
+              <div>
+                <div className="text-3xl font-bold font-mono tracking-tight text-slate-100">
+                  {catalog.length}
+                </div>
+                <div className="text-xs text-slate-500 mt-1">Flares Registered In Catalog</div>
               </div>
-              <div className="text-xs text-slate-500 mt-1">Flares Registered In Catalog</div>
+              <div className="text-right">
+                <span className="text-[10px] text-slate-400 block uppercase mb-1">Current State</span>
+                <span className={`px-2 py-0.5 rounded font-bold text-[10px] ${
+                  forecast.nowcast_class === 'X-Class' ? 'bg-red-500/15 text-red-500 border border-red-500/30' :
+                  forecast.nowcast_class === 'M-Class' ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30' :
+                  forecast.nowcast_class === 'C-Class' ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30' :
+                  'bg-slate-800 text-slate-400 border border-slate-700'
+                }`}>
+                  {forecast.nowcast_class || "Quiet"}
+                </span>
+              </div>
             </div>
             <div className="text-xs text-slate-400 border-t border-slate-900 pt-2 flex items-center justify-between">
               <span>X-Class: {catalog.filter(e => e.goes_class === 'X-Class').length}</span>
