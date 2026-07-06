@@ -162,12 +162,12 @@ class CNNLSTMForecaster(nn.Module):
             dropout=0.2
         )
         
-        # Fully connected predictor
+        # Fully connected predictor — outputs LOGITS (no Sigmoid here)
+        # BCEWithLogitsLoss handles sigmoid internally for numerical stability
         self.fc = nn.Sequential(
             nn.Linear(lstm_hidden_dim, 16),
             nn.ReLU(),
-            nn.Linear(16, 1),
-            nn.Sigmoid()
+            nn.Linear(16, 1)
         )
         
     def forward(self, x):
@@ -229,28 +229,32 @@ class CNNLSTMForecasterWrapper:
             
         import torch.optim as optim
         from torch.utils.data import DataLoader, TensorDataset
-        
+
         train_ds = TensorDataset(torch.tensor(X_seqs, dtype=torch.float32), torch.tensor(y_seqs, dtype=torch.float32))
         train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-        
-        # scale_pos_weight calculation for loss balancing
-        neg_count = sum(y == 0)
-        pos_count = sum(y == 1)
-        spw = neg_count / pos_count if pos_count > 0 else 10.0
-        weight_tensor = torch.tensor([float(spw)]).to(self.device)
-        
+
+        # Use BCEWithLogitsLoss with pos_weight for class-imbalance correction.
+        # This is numerically stable (no log(0) risk) and prevents collapse to majority class.
+        neg_count = (y_seqs == 0).sum()
+        pos_count = (y_seqs == 1).sum()
+        spw = float(neg_count / pos_count) if pos_count > 0 else 10.0
+        # Cap pos_weight at 20 to prevent over-correction that inverts predictions
+        spw = min(spw, 20.0)
+        criterion = nn.BCEWithLogitsLoss(
+            pos_weight=torch.tensor([spw], dtype=torch.float32).to(self.device)
+        )
+        print(f"  CNN-LSTM pos_weight={spw:.2f} ({neg_count} neg / {pos_count} pos)")
+
         optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        
+
         self.model.train()
         for epoch in range(epochs):
             epoch_loss = 0.0
             for batch_x, batch_y in train_loader:
                 batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
                 optimizer.zero_grad()
-                preds = self.model(batch_x)
-                
-                # Weighted BCELoss because Sigmoid is in the forward function
-                loss = -torch.mean(weight_tensor * batch_y * torch.log(preds + 1e-7) + (1 - batch_y) * torch.log(1 - preds + 1e-7))
+                logits = self.model(batch_x)          # raw logits
+                loss = criterion(logits, batch_y)
                 loss.backward()
                 optimizer.step()
                 epoch_loss += loss.item() * len(batch_y)
@@ -281,23 +285,25 @@ class CNNLSTMForecasterWrapper:
     def predict_probability(self, X):
         """
         Expects X of shape (seq_len, num_features) or (N, num_features) representing the history.
+        Returns flare probability in [0, 1].
         """
         if not self.is_trained:
             return 0.0
-            
+
         if len(X) < self.seq_len:
             return 0.0
-            
+
         # Scale the features
         X_scaled = self.scaler.transform(X)
-        
+
         # Take the latest seq_len steps
         seq = X_scaled[-self.seq_len:]
-        
+
         # Format for model: shape (1, seq_len, num_features)
         seq_tensor = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(self.device)
-        
+
         self.model.eval()
         with torch.no_grad():
-            prob = self.model(seq_tensor).cpu().numpy()[0]
+            logit = self.model(seq_tensor)           # raw logit
+            prob = torch.sigmoid(logit).cpu().numpy()[0]  # convert to probability
         return float(prob)

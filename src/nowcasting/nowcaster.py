@@ -16,13 +16,29 @@ def compute_derivatives(df, col='flux_solexs_clean', dt=1):
     deriv[-1] = (flux[-1] - flux[-2]) / dt
     return deriv
 
-def detect_flares_rule_based(df, sxr_col='flux_solexs_clean', hxr_col='flux_hel1os_clean', dt=1):
+def detect_flares_rule_based(
+    df,
+    sxr_col='flux_solexs_clean',
+    hxr_col='flux_hel1os_clean',
+    dt=1,
+    min_duration_seconds=60,
+    min_peak_flux_sxr=1e-6,
+    min_peak_flux_hxr=1e-7
+):
     """
     Algorithmic Nowcasting: Detects flares independently in soft and hard X-rays.
     Uses first-derivative rate of change and identifies start, peak, and stop times.
+
+    Args:
+        min_duration_seconds: Minimum flare duration to register (default 60s).
+            Filters out cosmic ray spikes and sub-second noise bursts.
+        min_peak_flux_sxr: Minimum SXR peak flux to register (default 1e-6 = C-class).
+        min_peak_flux_hxr: Minimum HXR peak flux to register (default 1e-7).
     """
     events = []
-    
+    # Ensure integer index for safe .loc[] access
+    df = df.reset_index(drop=True)
+
     # Calculate derivatives
     deriv_sxr = compute_derivatives(df, sxr_col, dt)
     deriv_hxr = compute_derivatives(df, hxr_col, dt)
@@ -61,26 +77,29 @@ def detect_flares_rule_based(df, sxr_col='flux_solexs_clean', hxr_col='flux_hel1
             # Flare ends when derivative returns to near zero and flux decays
             # Or if it starts rising again (new flare)
             if d < 1e-9 and flux < (peak_flux_sxr * 0.5 + df.loc[start_idx_sxr, sxr_col] * 0.5):
-                # Classify flare using GOES scale
-                goes_class = "Quiet"
-                if peak_flux_sxr >= 1e-4:
-                    goes_class = "X-Class"
-                elif peak_flux_sxr >= 1e-5:
-                    goes_class = "M-Class"
-                elif peak_flux_sxr >= 1e-6:
-                    goes_class = "C-Class"
-                else:
-                    goes_class = "B-Class / Sub-flare"
-                    
-                events.append({
-                    "instrument": "SoLEXS (Soft X-ray)",
-                    "start_time": df.loc[start_idx_sxr, 'timestamp'],
-                    "peak_time": df.loc[peak_idx_sxr, 'timestamp'],
-                    "end_time": df.loc[i, 'timestamp'],
-                    "peak_flux": peak_flux_sxr,
-                    "goes_class": goes_class,
-                    "duration_seconds": (df.loc[i, 'timestamp'] - df.loc[start_idx_sxr, 'timestamp']).total_seconds()
-                })
+                duration_s = (df.loc[i, 'timestamp'] - df.loc[start_idx_sxr, 'timestamp']).total_seconds()
+
+                # Quality gate: reject noise spikes (cosmic rays, sub-minute bursts)
+                if peak_flux_sxr >= min_peak_flux_sxr and duration_s >= min_duration_seconds:
+                    # Classify flare using GOES scale
+                    if peak_flux_sxr >= 1e-4:
+                        goes_class = "X-Class"
+                    elif peak_flux_sxr >= 1e-5:
+                        goes_class = "M-Class"
+                    elif peak_flux_sxr >= 1e-6:
+                        goes_class = "C-Class"
+                    else:
+                        goes_class = "B-Class / Sub-flare"
+
+                    events.append({
+                        "instrument": "SoLEXS (Soft X-ray)",
+                        "start_time": df.loc[start_idx_sxr, 'timestamp'],
+                        "peak_time": df.loc[peak_idx_sxr, 'timestamp'],
+                        "end_time": df.loc[i, 'timestamp'],
+                        "peak_flux": peak_flux_sxr,
+                        "goes_class": goes_class,
+                        "duration_seconds": duration_s
+                    })
                 in_flare_sxr = False
                 peak_flux_sxr = 0.0
                 
@@ -109,25 +128,28 @@ def detect_flares_rule_based(df, sxr_col='flux_solexs_clean', hxr_col='flux_hel1
                 peak_idx_hxr = i
                 
             if d < 5e-10 and flux < (peak_flux_hxr * 0.3 + df.loc[start_idx_hxr, hxr_col] * 0.7):
-                goes_class = "Quiet"
-                if peak_flux_hxr >= 1e-5:
-                    goes_class = "X-Class Equivalent"
-                elif peak_flux_hxr >= 1e-6:
-                    goes_class = "M-Class Equivalent"
-                elif peak_flux_hxr >= 1e-7:
-                    goes_class = "C-Class Equivalent"
-                else:
-                    goes_class = "Sub-flare"
-                    
-                events.append({
-                    "instrument": "HEL1OS (Hard X-ray)",
-                    "start_time": df.loc[start_idx_hxr, 'timestamp'],
-                    "peak_time": df.loc[peak_idx_hxr, 'timestamp'],
-                    "end_time": df.loc[i, 'timestamp'],
-                    "peak_flux": peak_flux_hxr,
-                    "goes_class": goes_class,
-                    "duration_seconds": (df.loc[i, 'timestamp'] - df.loc[start_idx_hxr, 'timestamp']).total_seconds()
-                })
+                duration_s = (df.loc[i, 'timestamp'] - df.loc[start_idx_hxr, 'timestamp']).total_seconds()
+
+                # Quality gate: reject noise spikes
+                if peak_flux_hxr >= min_peak_flux_hxr and duration_s >= min_duration_seconds:
+                    if peak_flux_hxr >= 1e-5:
+                        goes_class = "X-Class Equivalent"
+                    elif peak_flux_hxr >= 1e-6:
+                        goes_class = "M-Class Equivalent"
+                    elif peak_flux_hxr >= 1e-7:
+                        goes_class = "C-Class Equivalent"
+                    else:
+                        goes_class = "Sub-flare"
+
+                    events.append({
+                        "instrument": "HEL1OS (Hard X-ray)",
+                        "start_time": df.loc[start_idx_hxr, 'timestamp'],
+                        "peak_time": df.loc[peak_idx_hxr, 'timestamp'],
+                        "end_time": df.loc[i, 'timestamp'],
+                        "peak_flux": peak_flux_hxr,
+                        "goes_class": goes_class,
+                        "duration_seconds": duration_s
+                    })
                 in_flare_hxr = False
                 peak_flux_hxr = 0.0
                 
