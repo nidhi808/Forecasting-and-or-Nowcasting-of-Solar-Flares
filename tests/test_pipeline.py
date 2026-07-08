@@ -84,7 +84,7 @@ def test_nowcasting():
         "flux_hel1os_clean": np.ones(100) * 1e-8
     })
     
-    events = detect_flares_rule_based(df)
+    events = detect_flares_rule_based(df, min_duration_seconds=20)
     
     assert len(events) > 0
     # Peak flux should match our injected value approx

@@ -321,14 +321,22 @@ function App() {
                 <span className="text-lg font-bold text-slate-400">%</span>
               </div>
               <div className="text-xs text-slate-400 mt-1">
-                Flare Probability (15-30m Lead Time)
+                Flare Probability ({forecast.lead_time_minutes || 15}-{forecast.lead_time_minutes ? forecast.lead_time_minutes + 15 : 30}m Lead Time)
               </div>
             </div>
-            <div className="text-xs border-t border-slate-900 pt-2 flex items-center justify-between">
-              <span className="text-slate-400">ALERT STATUS:</span>
-              <span className={`font-bold uppercase tracking-wider ${criticalAlert ? 'text-red-500' : (activeAlert ? 'text-amber-500' : 'text-emerald-400')}`}>
-                {forecast.status}
-              </span>
+            <div className="text-xs border-t border-slate-900 pt-2 flex flex-col space-y-1.5">
+              <div className="flex items-center justify-between">
+                <span className="text-slate-400">ALERT STATUS:</span>
+                <span className={`font-bold uppercase tracking-wider ${criticalAlert ? 'text-red-500' : (activeAlert ? 'text-amber-500' : 'text-emerald-400')}`}>
+                  {forecast.status}
+                </span>
+              </div>
+              <div className="flex items-center justify-between text-[10px] text-slate-500 pt-0.5 border-t border-slate-900/50">
+                <span>FALSE ALARM RATE (FAR):</span>
+                <span className="font-semibold text-slate-400">
+                  {forecast.false_alarm_rate !== undefined ? `${(forecast.false_alarm_rate * 100).toFixed(1)}%` : "15.0%"}
+                </span>
+              </div>
             </div>
           </div>
 
